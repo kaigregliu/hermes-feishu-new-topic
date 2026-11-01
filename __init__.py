@@ -145,14 +145,17 @@ async def _handle(ctx, event, gateway):
     else:
         body = body.strip()
 
-    # 未授权的人不该能触发建话题（钩子在 auth 之前跑，自己判一次）
+    # 未授权的人不该能触发建话题（钩子在 auth 之前跑，自己判一次）。
+    # 探针本身出错时按「不是触发」处理（fail closed）：消息照常走内核的授权流程，
+    # 不会留下一条没人回复的孤儿话题。
     auth = getattr(gateway, "_is_user_authorized_for_source", None)
     if callable(auth):
         try:
             if not auth(source):
                 return None
         except Exception:
-            logger.debug("[feishu-new-topic] auth probe failed", exc_info=True)
+            logger.warning("[feishu-new-topic] auth probe failed; passing through", exc_info=True)
+            return None
 
     if getattr(source, "thread_id", None):
         # 已经在话题里：飞书没有嵌套话题，去掉前缀并在末尾说明
@@ -222,7 +225,8 @@ async def _create_thread(adapter, message_id: str) -> str:
             if code != 2200:
                 break
             logger.info("[feishu-new-topic] reply attempt %d got [2200], retrying", attempt + 1)
-        await asyncio.sleep(0.4 * (attempt + 1))
+        if attempt + 1 < _THREAD_ATTEMPTS:
+            await asyncio.sleep(0.4 * (attempt + 1))
 
     if not thread_id:
         raise RuntimeError(last_error)
@@ -270,7 +274,7 @@ async def _recall_placeholder(adapter, client, message_id: str) -> None:
         request = DeleteMessageRequest.builder().message_id(message_id).build()
         await _call(adapter, client.im.v1.message.delete, request)
     except Exception:
-        logger.debug("[feishu-new-topic] placeholder recall failed", exc_info=True)
+        logger.warning("[feishu-new-topic] placeholder recall failed", exc_info=True)
 
 
 async def _call(adapter, fn, request):

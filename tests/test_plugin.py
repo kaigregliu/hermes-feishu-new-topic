@@ -343,7 +343,7 @@ def markdown_doc_paste_untouched():
 
 @case
 def long_body_opens_topic():
-    """没有长度限制：% 开头的长文一样开话题（不需要 #! 这种例外）。"""
+    """没有长度限制：#new 开头的长文（含换行/序号）一样开话题，不需要任何例外规则。"""
     mod, ctx, adapter, gateway, hook = build()
     body = "帮我核这份长清单\n1. 第一条\n2. 第二条\n3. 第三条\n4. 第四条"
     event = FakeEvent("#new " + body)
