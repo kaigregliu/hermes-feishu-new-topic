@@ -106,7 +106,8 @@ hermes plugins validate ~/.hermes/plugins/feishu-new-topic   # expect: Validatio
 hermes plugins doctor feishu-new-topic                       # expect: OK … 1 hook(s)
 ```
 
-**Requirements:** Hermes Agent with the Feishu adapter configured and online. The manifest declares
+**Requirements:** Hermes Agent with the Feishu adapter configured and online, running plugins
+in-process (`plugins.isolation: in_process`, the default). The manifest declares
 `requires_hermes: ">=0.22"`; the plugin was built and verified against Hermes 0.22.5. No Python
 dependencies — `lark_oapi` ships with Hermes and is imported lazily, only when a topic is actually
 created.
@@ -127,6 +128,13 @@ created.
 - Groups: the bot must actually receive the message. That is Feishu's `require_mention` behaviour
   (default `true`, configurable in the adapter's `extra`), not something this plugin changes.
 - One level only: a topic cannot contain a topic.
+- In-process only: with `plugins.isolation: host`, hooks receive a placeholder gateway instead of the
+  live runner, so the plugin cannot resolve the receiving bot or the sender's authorisation. It then
+  does nothing and the message stays as written in the current session.
+- If Feishu processed the reply but every response is lost on the way back, the plugin never learns
+  the `thread_id`: the message is dispatched normally in the current session, and the topic that was
+  created server-side (with its placeholder) may be left orphaned. Retries reuse one request UUID,
+  which makes a duplicate topic unlikely, but no client can resolve that ambiguity blindly.
 - No topic-title API is involved. Feishu derives the label shown in the message list from the first
   message in the topic; the plugin deletes its placeholder, so the agent's first reply is what
   shows. Feishu's API has no topic-title field to set.
@@ -137,14 +145,19 @@ created.
 
 ### Disclosure
 
-- **Network:** two Feishu OpenAPI calls per trigger — `messages/{id}/reply` (create the topic) and
-  `messages/{id}/delete` (remove the placeholder). Nothing else is called; no telemetry.
-- **Credentials:** none handled. The plugin uses the Feishu client Hermes already authenticated.
-- **State:** a dedupe map (15 min TTL, ≤40 entries) in the plugin context. Hermes persists that to
-  `~/.hermes/plugin-data/<plugin>/state.json`; it holds only `{thread_id, timestamp}` pairs.
-- **Hermes surfaces:** the `pre_gateway_dispatch` hook, plus read-only access to the gateway's live
-  adapters (`_adapters_for_profile` / `adapters`) and that adapter's Feishu client. No rebinding of
-  core objects.
+- **Network:** normally two Feishu OpenAPI calls — `messages/{id}/reply` with `reply_in_thread=true`
+  (creates the topic, returns `thread_id`) and `messages/{id}/delete` (removes the one-character
+  placeholder reply). The reply is retried up to three times on `2200 Internal Error` or network
+  errors, so a failing creation can cost three attempts; cached duplicates, in-topic messages and
+  unauthorised senders make no calls at all. Nothing else is contacted; no telemetry.
+- **Credentials:** none handled. Calls go through the Feishu client of the bot that received the
+  message (`_delivery_adapter_for`), which Hermes already authenticated.
+- **State:** a dedupe map (15 min TTL, ≤40 entries) in the plugin context, persisted by Hermes to
+  `~/.hermes/plugin-data/<plugin>/state.json`. Each entry is keyed by the Feishu `message_id` it came
+  from and holds `{thread_id, timestamp}` — message ids and topic ids, no message content.
+- **Hermes surfaces:** the `pre_gateway_dispatch` hook, plus read-only access to the receiving bot's
+  adapter (`_delivery_adapter_for`) and its Feishu client. No rebinding of core objects, and no
+  guessing an adapter from the profile or the default bot.
 - **Authorisation:** a message is only rewritten after the gateway's own authorisation probe
   (`_is_user_authorized_for_source`) says yes. With no such probe, the plugin does nothing — fail
   closed, never "open the topic anyway".
@@ -155,13 +168,14 @@ created.
 
 ```bash
 pip install lark-oapi         # the recall path builds a real DeleteMessageRequest
-python tests/test_plugin.py   # expect: 17/17 passed
+python tests/test_plugin.py   # expect: 20/20 passed
 ```
 
 No Hermes installation needed — the suite drives the hook with fake adapters, events and context.
 Covers: trigger and prefix stripping, full-width and case forms, plain text untouched, `#`-forms
-untouched, `#news` boundary, bare `#new`, in-topic degradation, creation failure, duplicate reuse,
-unauthorised sender, a gateway without the authorisation probe (fail closed), voice phrasings
+untouched, `#news` boundary, bare `#new`, in-topic degradation, creation failure, duplicate reuse
+(sequential and concurrent), the receiving bot winning over a profile's own bot, unauthorised sender,
+a gateway without the authorisation probe or the delivery resolver (fail closed), voice phrasings
 (including ASR spacing and phrase-inside-body), long body.
 
 ### License
@@ -262,9 +276,9 @@ hermes plugins validate ~/.hermes/plugins/feishu-new-topic   # 期望：Validati
 hermes plugins doctor feishu-new-topic                       # 期望：OK … 1 hook(s)
 ```
 
-**前提：** Hermes Agent 的飞书适配器已配好并在线。manifest 声明 `requires_hermes: ">=0.22"`，
-插件在 Hermes 0.22.5 上开发并验证。不需要任何 Python 依赖 —— `lark_oapi` 随 Hermes 一起装，
-且只在真正建话题时才懒加载。
+**前提：** Hermes Agent 的飞书适配器已配好并在线，且插件在进程内运行（`plugins.isolation:
+in_process`，这也是默认值）。manifest 声明 `requires_hermes: ">=0.22"`，插件在 Hermes 0.22.5 上
+开发并验证。不需要任何 Python 依赖 —— `lark_oapi` 随 Hermes 一起装，且只在真正建话题时才懒加载。
 
 ### 失败时怎么办
 
@@ -282,21 +296,31 @@ hermes plugins doctor feishu-new-topic                       # 期望：OK … 1
 - 群聊里机器人必须真收到这条消息 —— 那是飞书的 `require_mention` 行为（默认 `true`，可在适配器
   `extra` 里配），本插件不改变它。
 - 只有一层：话题里不能再开话题。
+- 只在进程内生效：若 `plugins.isolation: host`，钩子拿到的是占位网关而不是活的 runner，插件无法
+  解析「收到消息的 bot」和发送者授权 —— 此时它什么都不做，消息按原文留在当前会话。
+- 如果飞书已经处理了 reply、但所有响应都在回程丢失，插件拿不到 `thread_id`：消息降级回主会话，
+  而服务端已建出的那条话题（含占位回复）可能成为孤儿。重试复用同一个请求 UUID 能大幅降低重复建
+  话题的概率，但这种「结果未知」任何客户端都无法盲解。
 - 不涉及任何话题标题 API。飞书消息列表里那个标题来自话题里的第一条消息；插件把占位消息撤掉了，
   所以显示的是 agent 的第一句回复。飞书的 API 没有可设置的话题标题字段。
-- 依赖网关/适配器内部属性（`_adapters_for_profile`、适配器的 `_client` 与 `_run_blocking`）。
+- 依赖网关/适配器内部接口（`_delivery_adapter_for`、适配器的 `_client` 与 `_run_blocking`）。
   这些在 Hermes 0.22 里存在，Hermes 自带的插件也在用，但将来飞书适配器重构可能让它失效 ——
   失效时降级成「开不了话题」，不会丢消息。
 
 ### 披露
 
-- **网络：** 每次触发两次飞书 OpenAPI 调用 —— `messages/{id}/reply`（建话题）和
-  `messages/{id}/delete`（撤掉占位）。没有其它调用，没有埋点。
-- **凭据：** 不碰。用的是 Hermes 已经登录好的飞书客户端。
-- **状态：** 插件上下文里存一份去重表（15 分钟 TTL，最多 40 条）。Hermes 会把它落到
-  `~/.hermes/plugin-data/<plugin>/state.json`，内容只有 `{thread_id, 时间戳}` 这样的键值。
-- **用到的 Hermes 接口：** `pre_gateway_dispatch` 钩子，以及对网关在线适配器
-  （`_adapters_for_profile` / `adapters`）和该适配器飞书客户端的**只读**访问。不挂接（rebind）任何内核对象。
+- **网络：** 正常两次飞书 OpenAPI 调用 —— `messages/{id}/reply`（带 `reply_in_thread=true`，建话题并
+  返回 `thread_id`）和 `messages/{id}/delete`（撤掉单字符占位）。reply 在 `2200 Internal Error` 或
+  网络错误时最多重试 3 次，所以建话题失败一次最多会打 3 次；命中缓存、在话题内、未授权这三种情况
+  **一次调用都不发**。除此之外不联系任何服务，没有埋点。
+- **凭据：** 不碰。调用走「收到这条消息的那个 bot」的飞书客户端（`_delivery_adapter_for`），
+  那是 Hermes 已经登录好的。
+- **状态：** 插件上下文里存一份去重表（15 分钟 TTL，最多 40 条），Hermes 会把它落到
+  `~/.hermes/plugin-data/<plugin>/state.json`。每条以来源的飞书 `message_id` 为键，值只有
+  `{thread_id, 时间戳}` —— 消息 id 与话题 id，没有消息正文。
+- **用到的 Hermes 接口：** `pre_gateway_dispatch` 钩子，以及对「接收消息的 bot」适配器
+  （`_delivery_adapter_for`）与其飞书客户端的**只读**访问。不挂接（rebind）任何内核对象，
+  也不按 profile 或默认 bot 去猜适配器。
 - **授权：** 只有当网关自己的授权探针（`_is_user_authorized_for_source`）放行时才会改写消息；
   探针不存在就什么都不做 —— fail closed，绝不「先开了再说」。
 - **语言：** 插件附加的提示（空正文占位语、话题内提示、失败提示）目前只有中文，不随用户语言切换。
@@ -305,12 +329,13 @@ hermes plugins doctor feishu-new-topic                       # 期望：OK … 1
 
 ```bash
 pip install lark-oapi         # 撤回路径会构造真实的 DeleteMessageRequest
-python tests/test_plugin.py   # 期望：17/17 passed
+python tests/test_plugin.py   # 期望：20/20 passed
 ```
 
 不需要装 Hermes —— 用假的适配器、事件和上下文直接驱动钩子。
 覆盖：触发与去前缀、全角与大小写、普通消息不动、单个 `#` 系列不动、`#news` 边界、只发 `#new`、
-话题内降级、建话题失败降级、重复投递复用、未授权不触发、网关没有授权探针时 fail closed、
+话题内降级、建话题失败降级、重复投递复用（顺序与并发）、多 profile 下「接收 bot 优先于运行
+profile 自己的 bot」、未授权不触发、网关缺授权探针或缺 delivery 解析器时 fail closed、
 语音各种说法（含 ASR 断字与句中不触发）、长正文照常开。
 
 ### 许可

@@ -46,13 +46,13 @@ class Platform:
 
 
 class FakeSource:
-    def __init__(self, thread_id=None, chat_type="dm"):
+    def __init__(self, thread_id=None, chat_type="dm", message_id="om_in"):
         self.platform = Platform("feishu")
         self.chat_id = "oc_test"
         self.chat_type = chat_type
         self.thread_id = thread_id
         self.profile = None
-        self.message_id = "om_in"
+        self.message_id = message_id
 
 
 class FakeEvent:
@@ -106,11 +106,13 @@ class FakeClient:
 
 
 class FakeAdapter:
-    def __init__(self, thread_id="omt_new001", fail=False, placeholder_id="om_placeholder"):
+    def __init__(self, thread_id="omt_new001", fail=False, placeholder_id="om_placeholder",
+                 platform="feishu"):
         self.calls = []
         self.thread_id = thread_id
         self.fail = fail
         self.placeholder_id = placeholder_id
+        self.platform = Platform(platform)
         self._client = FakeClient(self)
 
     # 用请求元组模拟 SDK 的构建器，避免测试依赖 lark_oapi
@@ -121,6 +123,7 @@ class FakeAdapter:
         return {"message_id": message_id, "body": body}
 
     async def _run_blocking(self, fn, request):
+        await asyncio.sleep(0)  # 模拟真实 I/O：让出事件循环，并发才会交叠
         return fn(request)
 
 
@@ -128,9 +131,14 @@ class FakeGateway:
     def __init__(self, adapter):
         self.adapters = {Platform("feishu"): adapter}
         self.authorized = True
+        # 从「收到消息的那个 bot」发货：默认就是同一个 adapter
+        self.delivery_adapter = adapter
 
     def _adapters_for_profile(self, profile):
         return self.adapters
+
+    def _delivery_adapter_for(self, source):
+        return self.delivery_adapter
 
     def _is_user_authorized_for_source(self, source):
         return self.authorized
@@ -310,6 +318,53 @@ def missing_auth_probe_fails_closed():
     assert run(hook, event, gateway) is None
     assert adapter.calls == [], adapter.calls
     assert event.source.thread_id is None
+
+
+@case
+def delivery_adapter_beats_profile_adapter():
+    """多 profile：必须用「收到这条消息的 bot」，不能用运行 profile 自己的 bot。"""
+    mod, ctx, receiving, gateway, hook = build()
+    other = FakeAdapter(thread_id="omt_from_wrong_bot")
+    gateway.adapters = {Platform("feishu"): other}      # 运行 profile 自己的 bot
+    gateway.delivery_adapter = receiving                # 实际收到消息的 bot
+    event = FakeEvent("#new 多 profile")
+    result = run(hook, event, gateway)
+    assert result["text"] == "多 profile"
+    assert [c[0] for c in receiving.calls] == ["reply", "delete"], receiving.calls
+    assert other.calls == [], other.calls
+    assert event.source.thread_id == receiving.thread_id
+
+
+@case
+def concurrent_duplicates_open_one_topic():
+    """同一条消息并发投递：只允许建一条话题。"""
+    mod, ctx, adapter, gateway, hook = build()
+    events = [
+        FakeEvent("#new 并发", source=FakeSource(message_id="om_same"), message_id="om_same"),
+        FakeEvent("#new 并发", source=FakeSource(message_id="om_same"), message_id="om_same"),
+    ]
+
+    async def both():
+        return await asyncio.gather(*[hook(event=e, gateway=gateway) for e in events])
+
+    results = asyncio.run(both())
+    assert [c[0] for c in adapter.calls] == ["reply", "delete"], adapter.calls
+    assert [r["text"] for r in results] == ["并发", "并发"]
+    assert {e.source.thread_id for e in events} == {adapter.thread_id}
+
+
+@case
+def missing_delivery_resolver_degrades():
+    """网关没有 delivery 解析器（host 隔离/旧内核）：降级，不猜 bot、不写飞书。"""
+    mod, ctx, adapter, gateway, hook = build()
+
+    class _NoDelivery(FakeGateway):
+        _delivery_adapter_for = None
+
+    event = FakeEvent("#new 没有解析器")
+    result = run(hook, event, _NoDelivery(adapter))
+    assert adapter.calls == [], adapter.calls
+    assert "失败" in result["text"], result
 
 
 @case

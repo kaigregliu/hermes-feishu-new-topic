@@ -78,6 +78,8 @@ _EMPTY_BODY_TEXT = "（刚开了一条新话题，等你下一步指令）"
 _STATE_KEY = "recent"
 _STATE_MAX = 40
 _STATE_TTL = 900.0  # 秒
+# 同一条消息的并发投递：按 message_id 的进程内锁（见 _handle）
+_INFLIGHT: dict[str, asyncio.Lock] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -167,6 +169,19 @@ async def _handle(ctx, event, gateway):
     if not message_id:
         return None
 
+    # 同一条消息的重复投递可能并发到达：去重缓存是「先读、await 建话题、再写」，
+    # 两个钩子会同时错过缓存、各建一次话题。按 message_id 做进程内 single-flight，
+    # 后到的那个在锁上等，出锁时必然命中缓存。
+    lock = _INFLIGHT.setdefault(message_id, asyncio.Lock())
+    try:
+        async with lock:
+            return await _open_topic(ctx, gateway, source, body, message_id)
+    finally:
+        if not lock.locked() and _INFLIGHT.get(message_id) is lock:
+            _INFLIGHT.pop(message_id, None)
+
+
+async def _open_topic(ctx, gateway, source, body, message_id):
     cached = _recall(ctx, message_id)
     if cached:
         source.thread_id = cached
@@ -295,19 +310,33 @@ def _platform(source) -> str:
 
 
 def _feishu_adapter(gateway, source):
-    adapters = {}
-    lookup = getattr(gateway, "_adapters_for_profile", None)
-    if callable(lookup):
-        try:
-            adapters = lookup(getattr(source, "profile", None)) or {}
-        except Exception:
-            logger.debug("[feishu-new-topic] adapter lookup by profile failed", exc_info=True)
-    if not adapters:
-        adapters = getattr(gateway, "adapters", None) or {}
-    for platform, adapter in adapters.items():
-        if str(getattr(platform, "value", platform)).lower() == "feishu":
-            return adapter
-    return None
+    """回答这条消息的那个 bot —— 只用内核的 delivery 解析器。
+
+    内核契约（``gateway/AGENTS.md``「Intake vs delivery adapter」）：回复某条消息必须走
+    ``_delivery_adapter_for(source)``（收到这条消息的 bot），**不得**读
+    ``gateway.adapters[platform]``，也不得按运行 profile 猜。在「共享 bot 收到、路由到
+    自有 bot 的 profile」这类拓扑下，猜出来的会是另一个 bot —— 等于拿别的 profile 的飞书
+    凭据去写这条消息。拿不到就返回 None 让上层降级，绝不借用默认 bot。
+    """
+    resolve = getattr(gateway, "_delivery_adapter_for", None)
+    if not callable(resolve):
+        logger.warning(
+            "[feishu-new-topic] gateway has no _delivery_adapter_for "
+            "(requires plugins.isolation: in_process); passing through"
+        )
+        return None
+    try:
+        adapter = resolve(source)
+    except Exception:
+        logger.warning("[feishu-new-topic] delivery adapter lookup failed", exc_info=True)
+        return None
+    if adapter is None:
+        return None
+    adapter_platform = getattr(adapter, "platform", None)
+    if str(getattr(adapter_platform, "value", adapter_platform) or "").lower() != "feishu":
+        logger.warning("[feishu-new-topic] delivery adapter is not feishu; passing through")
+        return None
+    return adapter
 
 
 def _state(ctx):

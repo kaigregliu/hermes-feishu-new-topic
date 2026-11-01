@@ -1,7 +1,7 @@
 name: feishu-new-topic
 label: Feishu New Topic
 kind: standalone
-version: 0.3.4
+version: 0.3.5
 description: >-
   飞书里用固定的「#new 」token（或口述「开启一个新话题」）= 在当条消息上开一条新话题
   （= 新 session）。关键差别：/new 是重置，会打断主会话里正在跑的任务并清空对话；
