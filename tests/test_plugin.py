@@ -292,6 +292,26 @@ def unauthorized_user_ignored():
     assert adapter.calls == []
 
 
+class _GatewayWithoutAuthProbe:
+    """网关没有授权探针（旧版/非标准网关）—— 插件必须 fail closed，不能先写飞书。"""
+
+    def __init__(self, adapter):
+        self.adapters = {Platform("feishu"): adapter}
+
+    def _adapters_for_profile(self, profile):
+        return self.adapters
+
+
+@case
+def missing_auth_probe_fails_closed():
+    mod, ctx, adapter, gateway, hook = build()
+    gateway = _GatewayWithoutAuthProbe(adapter)
+    event = FakeEvent("#new 没有授权探针")
+    assert run(hook, event, gateway) is None
+    assert adapter.calls == [], adapter.calls
+    assert event.source.thread_id is None
+
+
 @case
 def voice_phrase_with_content():
     mod, ctx, adapter, gateway, hook = build()

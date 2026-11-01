@@ -39,7 +39,7 @@ Two triggers. No escape character, no exceptions.
 | You send | Result |
 |---|---|
 | `#new <body>` | Opens a topic on that message; `<body>` is the first turn of the new session |
-| `#new` (alone) | Opens a topic; the body becomes a short placeholder telling the agent a topic was just opened |
+| `#new` (alone) | Opens a topic; the body becomes a Chinese placeholder telling the agent a topic was just opened |
 | `#NEW …` / `＃ｎｅｗ …` | Same — case and full-width forms are folded |
 | `#new …` **inside a topic** | No nested topics in Feishu: the prefix is stripped, a note is appended, the message stays in the current session |
 | anything else | Untouched, including `# heading`, `# comment`, `# new title`, `## h2`, `#!/bin/sh`, `#news` |
@@ -54,12 +54,13 @@ Why `#new` and not `#` or `%`: a bare `#` opens a Markdown heading, a root shell
 Python/shell comment; `%`, `$`, `>` collide with LaTeX, prompts and mail quotes. Pasting
 documentation or code would then require an escape rule. `#new` is a single token that Markdown
 never reads as a heading (`#` must be followed by a space) and that code only writes as `# new `.
-It is effectively collision-free, so there is no escape syntax at all.
+It does not collide with Markdown, code or shell syntax, so no escape rule is needed.
 
 ### Voice
 
-Voice notes are matched on these phrasings (spacing inside the phrase, as ASR produces it, is
-tolerated: `开启 一个 新话题`). Trailing punctuation is allowed; whatever follows is the body.
+Voice notes are matched against these phrasings. Arbitrary spacing inside a phrase — as ASR may
+insert — is tolerated (e.g. `开启 一个 新话题`). Trailing punctuation is allowed; whatever follows is
+the body.
 
 ```
 开启一个新话题 · 开启一个新的话题 · 开启一个新对话 · 开启一个新的对话
@@ -71,7 +72,7 @@ Phrase alone → topic opened, waiting for instruction.
 ### How it works
 
 Hermes derives the session key from `platform + chat_id + thread_id`, so a new topic already means a
-new session. What was missing is that Feishu has no "new conversation" button for a bot.
+new session. The missing piece: Feishu gives a bot no "new conversation" button.
 
 The plugin registers `pre_gateway_dispatch`, which Hermes runs at ingress **before** auth, command
 parsing and `build_session_key()`, and whose `event.source` is mutable:
@@ -144,16 +145,24 @@ created.
 - **Hermes surfaces:** the `pre_gateway_dispatch` hook, plus read-only access to the gateway's live
   adapters (`_adapters_for_profile` / `adapters`) and that adapter's Feishu client. No rebinding of
   core objects.
+- **Authorisation:** a message is only rewritten after the gateway's own authorisation probe
+  (`_is_user_authorized_for_source`) says yes. With no such probe, the plugin does nothing — fail
+  closed, never "open the topic anyway".
+- **Locale:** the notes the plugin appends (the empty-body placeholder, the in-topic note, the
+  failure notes) are Chinese-only, whatever language the user writes in.
 
 ### Test
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python tests/test_plugin.py   # 16/16 passed
+pip install lark-oapi         # the recall path builds a real DeleteMessageRequest
+python tests/test_plugin.py   # expect: 17/17 passed
 ```
 
+No Hermes installation needed — the suite drives the hook with fake adapters, events and context.
 Covers: trigger and prefix stripping, full-width and case forms, plain text untouched, `#`-forms
 untouched, `#news` boundary, bare `#new`, in-topic degradation, creation failure, duplicate reuse,
-unauthorised sender, voice phrasings (including ASR spacing and phrase-inside-body), long body.
+unauthorised sender, a gateway without the authorisation probe (fail closed), voice phrasings
+(including ASR spacing and phrase-inside-body), long body.
 
 ### License
 
@@ -175,7 +184,7 @@ Built for [Hermes Agent](https://hermes-agent.nousresearch.com/docs).
 ### 为什么不直接用 `/new`
 
 `/new` 是**重置**：它会打断该会话里正在跑的 turn，丢掉排队的跟进和在飞的后台任务，然后清空对话。
-主会话跑着长任务时，`/new` 会把它打死。
+主会话跑着长任务时，`/new` 会直接把它终止。
 
 `#new` 是**另开一条车道**：这条消息被路由到另一个 session（飞书话题），正在跑的活原样继续 ——
 同一个模型、同一批工具调用、已经产出的部分都还在。不打断，也不清空。
@@ -228,7 +237,7 @@ Hermes 的会话键来自 `platform + chat_id + thread_id`，所以「新话题 
 
 1. 对用户那条消息调 `POST /openapi/im/v1/messages/{message_id}/reply` 并带
    `reply_in_thread=true` —— 飞书返回 `thread_id`；
-2. 立刻撤回那条一像素占位回复（`·`）。话题留下，根消息是用户自己那条，话题里不残留机器人噪声；
+2. 立刻撤回那条单字符占位回复（`·`）。话题留下，根消息是用户自己那条，话题里不残留机器人噪声；
 3. 把 `event.source.thread_id` 改成新话题 id；网关会重读 `event.source`，于是
    `build_session_key()` 算出新的会话键；
 4. 去掉触发词，消息按正常 rewrite 分发。
@@ -286,18 +295,23 @@ hermes plugins doctor feishu-new-topic                       # 期望：OK … 1
 - **凭据：** 不碰。用的是 Hermes 已经登录好的飞书客户端。
 - **状态：** 插件上下文里存一份去重表（15 分钟 TTL，最多 40 条）。Hermes 会把它落到
   `~/.hermes/plugin-data/<plugin>/state.json`，内容只有 `{thread_id, 时间戳}` 这样的键值。
-- **用到的 Hermes 面：** `pre_gateway_dispatch` 钩子，以及对网关在线适配器
-  （`_adapters_for_profile` / `adapters`）和该适配器飞书客户端的**只读**访问。不改写内核对象的任何方法。
+- **用到的 Hermes 接口：** `pre_gateway_dispatch` 钩子，以及对网关在线适配器
+  （`_adapters_for_profile` / `adapters`）和该适配器飞书客户端的**只读**访问。不挂接（rebind）任何内核对象。
+- **授权：** 只有当网关自己的授权探针（`_is_user_authorized_for_source`）放行时才会改写消息；
+  探针不存在就什么都不做 —— fail closed，绝不「先开了再说」。
+- **语言：** 插件附加的提示（空正文占位语、话题内提示、失败提示）目前只有中文，不随用户语言切换。
 
 ### 自测
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python tests/test_plugin.py   # 16/16 passed
+pip install lark-oapi         # 撤回路径会构造真实的 DeleteMessageRequest
+python tests/test_plugin.py   # 期望：17/17 passed
 ```
 
+不需要装 Hermes —— 用假的适配器、事件和上下文直接驱动钩子。
 覆盖：触发与去前缀、全角与大小写、普通消息不动、单个 `#` 系列不动、`#news` 边界、只发 `#new`、
-话题内降级、建话题失败降级、重复投递复用、未授权不触发、语音各种说法（含 ASR 断字与句中不触发）、
-长正文照常开。
+话题内降级、建话题失败降级、重复投递复用、未授权不触发、网关没有授权探针时 fail closed、
+语音各种说法（含 ASR 断字与句中不触发）、长正文照常开。
 
 ### 许可
 

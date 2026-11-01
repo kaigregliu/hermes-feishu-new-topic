@@ -146,16 +146,18 @@ async def _handle(ctx, event, gateway):
         body = body.strip()
 
     # 未授权的人不该能触发建话题（钩子在 auth 之前跑，自己判一次）。
-    # 探针本身出错时按「不是触发」处理（fail closed）：消息照常走内核的授权流程，
-    # 不会留下一条没人回复的孤儿话题。
+    # 探针不存在或本身出错时一律按「不是触发」处理（fail closed）：消息照常走内核的授权流程，
+    # 既不会让未授权的人触发飞书写操作，也不会留下一条没人回复的孤儿话题。
     auth = getattr(gateway, "_is_user_authorized_for_source", None)
-    if callable(auth):
-        try:
-            if not auth(source):
-                return None
-        except Exception:
-            logger.warning("[feishu-new-topic] auth probe failed; passing through", exc_info=True)
+    if not callable(auth):
+        logger.warning("[feishu-new-topic] gateway has no authorization probe; passing through")
+        return None
+    try:
+        if not auth(source):
             return None
+    except Exception:
+        logger.warning("[feishu-new-topic] auth probe failed; passing through", exc_info=True)
+        return None
 
     if getattr(source, "thread_id", None):
         # 已经在话题里：飞书没有嵌套话题，去掉前缀并在末尾说明
