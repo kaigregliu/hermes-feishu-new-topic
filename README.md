@@ -99,3 +99,9 @@ hermes plugins disable feishu-new-topic && hermes gateway restart
 * 话题标题仍走内核约定：**我在这条话题里的第一条回复的开头**，所以新话题的第一轮回复要以
   `📌 …` 开头。
 * 会话被 `/new` 之后主聊天进入新 session，`#new` 行为不受影响。
+
+## 许可
+
+MIT —— 见 [LICENSE](LICENSE)。作者：kai & 雪碧。
+
+为 [Hermes Agent](https://hermes-agent.nousresearch.com/docs) 写的飞书侧补丁；插件不改核心、不改 `config.yaml`。

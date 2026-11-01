@@ -6,6 +6,6 @@ description: >
   飞书里用固定的「#new 」token（或口述「开启一个新话题」）= 立刻在单聊里开一条新话题（= 新 session），
   当条内容直接落进新会话，正在跑的主会话完全不被打断、上下文不串。
   只有两条规则，没有转义、没有例外；建话题失败时降级为普通消息并附一句提示。
-author: 雪碧
+author: kai & 雪碧
 provides_hooks:
   - pre_gateway_dispatch
