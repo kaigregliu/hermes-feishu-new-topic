@@ -1,13 +1,28 @@
 # feishu-new-topic
 
 A Hermes Agent plugin for Feishu/Lark: start a message with `#new ` and it opens a **new topic** —
-which in Hermes is a **new session** — without touching the conversation you were in.
+which in Hermes is a **new session** — while the session you were in keeps running, untouched.
 
 ```
 you:  #new check this quote for me
       └─ opens topic omt_… → this message lands in a fresh session
          the session you were in keeps running, untouched
 ```
+
+## Why not `/new`?
+
+`/new` is a *reset*: it interrupts the turn that is running in the session, drops its queued
+follow-ups and in-flight delegations, and clears the conversation. If a long task is running in the
+main chat, `/new` kills it.
+
+`#new` is a *second lane*. The message is routed to a different session (a Feishu topic), so the
+work in progress keeps running exactly as it was — same model, same tool calls, same partial output.
+Nothing is interrupted, nothing is cleared.
+
+| You want | Use |
+|---|---|
+| Start something unrelated while the current task keeps running | `#new …` |
+| Throw away the current conversation and everything running in it | `/new` |
 
 ## Rules
 
@@ -134,9 +149,11 @@ unauthorised sender, voice phrasings (including ASR spacing and phrase-inside-bo
 
 ## 中文速览
 
-飞书里发 `#new 正文`（或口述「开启一个新话题」）= 立刻开一条新话题，也就是**新 session**；
-正在跑的会话完全不动。只有这条规则，没有转义；话题里不能嵌套话题；建话题失败就按普通消息处理
-并在末尾附一句原因。安装 `hermes plugins install kaigregliu/hermes-feishu-new-topic`，
+飞书里发 `#new 正文`（或口述「开启一个新话题」）= 在当条消息上开一条新话题，也就是**新 session**。
+关键差别：`/new` 是**重置** —— 会打断主会话里正在跑的任务并清空对话；`#new` 是**另开一条车道**，
+主会话里正在跑的活照跑不误。只有这一条触发规则，没有转义；话题里不能嵌套话题；
+建话题失败就按普通消息处理并在末尾附一句原因。
+安装 `hermes plugins install kaigregliu/hermes-feishu-new-topic`，
 再 `hermes plugins enable feishu-new-topic && hermes gateway restart`。
 
 ## License
